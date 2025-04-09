@@ -1,0 +1,72 @@
+import torch
+import pandas as pd
+import numpy as np
+import re
+from transformers import BertTokenizer, BertModel
+from tqdm import tqdm
+from sklearn.preprocessing import LabelEncoder
+import joblib
+
+# Load mBERT tokenizer and model
+MODEL_NAME = "bert-base-multilingual-cased"
+tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
+model = BertModel.from_pretrained(MODEL_NAME)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+model.eval()
+
+# Load dataset (Replace 'your_dataset.xlsx' with actual file path)
+df = pd.read_excel("/content/NDP&Thirumurai_pann.xlsx")
+
+# Data Preprocessing
+def preprocess_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text).strip()
+    text = re.sub(r"[^ஂ-ஃஅ-஺ா-ூெ-ைொ-்0-9 ]", "", text)  # Keep Tamil characters & spaces
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+df[""] = df["PAZHURAMS"].apply(preprocess_text)
+df = df.dropna(subset=["PAZHURAMS", "PANN"]).reset_index(drop=True)
+
+# Encode PANN labels as numbers
+label_encoder = LabelEncoder()
+df["PANN_LABEL"] = label_encoder.fit_transform(df["PANN"])
+
+# Save label mapping for future use
+pann_mapping = dict(zip(df["PANN"], df["PANN_LABEL"]))  # Create mapping
+joblib.dump(label_encoder, "label_encoder.pkl")  # Save encoder
+
+# Print the PANN mapping
+print("\n🔹 PANN to Numeric Label Mapping:")
+for pann, label in pann_mapping.items():
+    print(f"{pann} → {label}")
+
+# Function to extract averaged BERT embedding
+def get_avg_bert_embedding(text):
+    tokens = tokenizer(text, padding="max_length", truncation=True, max_length=50, return_tensors="pt")
+    tokens = {key: value.to(device) for key, value in tokens.items()}
+    with torch.no_grad():
+        outputs = model(**tokens)
+
+    embeddings = outputs.last_hidden_state.squeeze(0)
+    attention_mask = tokens["attention_mask"].squeeze(0)
+
+    valid_embeddings = embeddings[attention_mask.bool()]
+    avg_embedding = valid_embeddings.mean(dim=0).cpu().numpy().tolist()  # Convert to list of floats
+
+    return avg_embedding
+
+# Extract embeddings
+print("\nExtracting averaged BERT embeddings...\n")
+embeddings = []
+for pazhuram, pann_label in tqdm(zip(df["PAZHURAMS"], df["PANN_LABEL"]), total=len(df)):
+    avg_embedding = get_avg_bert_embedding(pazhuram)
+    embeddings.append((avg_embedding, pann_label))  # No np.float32(), direct list of floats
+
+# Save to CSV with numeric labels
+embedding_df = pd.DataFrame(embeddings, columns=["Embedding", "PANN_LABEL"])
+embedding_df.to_csv("embeddings.csv", index=False)
+
+print("\n✅ Embeddings saved in 'embeddings.csv' with numeric PANN labels!")
